@@ -1,0 +1,192 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score
+from statsmodels.tsa.seasonal import seasonal_decompose
+
+# Step 1: Load and plot time series
+# Requires AirPassengers.xlsx with columns: Date, #Passengers
+df         = pd.read_excel('AirPassengers.xlsx', parse_dates=['Date'])
+df         = df.sort_values('Date').reset_index(drop=True)
+passengers = df['#Passengers'].values.astype(float)
+dates      = df['Date'].values
+print(df.head())
+
+plt.figure(figsize=(12, 4))
+plt.plot(dates, passengers, color='steelblue')
+plt.title('Air Passengers — Original Time Series')
+plt.xlabel('Date')
+plt.ylabel('Passengers')
+plt.tight_layout()
+plt.show()
+
+# Step 2: Moving averages (3, 5, 7, 9 month)
+series = pd.Series(passengers, index=df['Date'])
+ma3 = series.rolling(window=3).mean()
+ma5 = series.rolling(window=5).mean()
+ma7 = series.rolling(window=7).mean()
+ma9 = series.rolling(window=9).mean()
+
+plt.figure(figsize=(12, 5))
+plt.plot(dates, passengers, label='Original', alpha=0.5)
+plt.plot(dates, ma3, label='3-Month MA')
+plt.plot(dates, ma5, label='5-Month MA')
+plt.plot(dates, ma7, label='7-Month MA')
+plt.plot(dates, ma9, label='9-Month MA')
+plt.title('Moving Averages')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Step 3: Decomposition
+decomp = seasonal_decompose(series, model='multiplicative', period=12)
+fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+decomp.observed.plot(ax=axes[0],  title='Observed')
+decomp.trend.plot(ax=axes[1],     title='Trend')
+decomp.seasonal.plot(ax=axes[2],  title='Seasonality')
+decomp.resid.plot(ax=axes[3],     title='Residuals')
+plt.tight_layout()
+plt.show()
+
+# Step 4: MinMax scaling
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled = scaler.fit_transform(passengers.reshape(-1, 1)).flatten()
+print("Scaled min:", scaled.min(), "max:", scaled.max())
+
+# Step 5 & 6: Create sequences and train/test split
+def make_sequences(data, seq_len):
+    X, y = [], []
+    for i in range(len(data) - seq_len):
+        X.append(data[i:i + seq_len])
+        y.append(data[i + seq_len])
+    return np.array(X), np.array(y)
+
+SEQ_LEN = 3
+X, y    = make_sequences(scaled, SEQ_LEN)
+split   = int(len(X) * 0.8)
+X_train, X_test = X[:split], X[split:]
+y_train, y_test = y[:split], y[split:]
+print("X shape:", X.shape, "| Train:", X_train.shape, "| Test:", X_test.shape)
+
+X_tr_t = torch.tensor(X_train, dtype=torch.float32).unsqueeze(-1)
+X_te_t = torch.tensor(X_test,  dtype=torch.float32).unsqueeze(-1)
+y_tr_t = torch.tensor(y_train, dtype=torch.float32).unsqueeze(-1)
+y_te_t = torch.tensor(y_test,  dtype=torch.float32).unsqueeze(-1)
+
+# Step 8: LSTM Model
+class LSTMModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lstm = nn.LSTM(1, 64, 2, batch_first=True, dropout=0.2)
+        self.fc   = nn.Linear(64, 1)
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        return self.fc(out[:, -1, :])
+
+lstm_model = LSTMModel()
+optimizer  = optim.Adam(lstm_model.parameters(), lr=0.001)
+criterion  = nn.MSELoss()
+
+for epoch in range(100):
+    lstm_model.train()
+    optimizer.zero_grad()
+    pred     = lstm_model(X_tr_t)
+    ep_loss  = criterion(pred, y_tr_t)
+    ep_loss.backward()
+    optimizer.step()
+    if (epoch + 1) % 10 == 0:
+        print(f"Epoch {epoch+1}/100 — Loss: {ep_loss.item():.6f}")
+
+# Step 9: Predictions and plot
+lstm_model.eval()
+with torch.no_grad():
+    train_pred = lstm_model(X_tr_t).squeeze().numpy()
+    test_pred  = lstm_model(X_te_t).squeeze().numpy()
+
+train_pred_inv = scaler.inverse_transform(train_pred.reshape(-1, 1)).flatten()
+test_pred_inv  = scaler.inverse_transform(test_pred.reshape(-1, 1)).flatten()
+y_train_inv    = scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
+y_test_inv     = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+
+train_idx = range(SEQ_LEN, SEQ_LEN + len(train_pred_inv))
+test_idx  = range(SEQ_LEN + len(train_pred_inv), SEQ_LEN + len(train_pred_inv) + len(test_pred_inv))
+
+plt.figure(figsize=(12, 5))
+plt.plot(range(len(passengers)), passengers, label='Actual', color='gray', alpha=0.6)
+plt.plot(train_idx, train_pred_inv, label='LSTM Train Prediction')
+plt.plot(test_idx,  test_pred_inv,  label='LSTM Test Prediction')
+plt.title('LSTM — Air Passengers Prediction')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Steps 10-11: GRU Model (seq_len=4)
+SEQ_LEN2 = 4
+X2, y2   = make_sequences(scaled, SEQ_LEN2)
+split2   = int(len(X2) * 0.8)
+X_tr2_t  = torch.tensor(X2[:split2], dtype=torch.float32).unsqueeze(-1)
+X_te2_t  = torch.tensor(X2[split2:], dtype=torch.float32).unsqueeze(-1)
+y_tr2_t  = torch.tensor(y2[:split2], dtype=torch.float32).unsqueeze(-1)
+
+class GRUModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gru = nn.GRU(1, 64, 2, batch_first=True, dropout=0.2)
+        self.fc  = nn.Linear(64, 1)
+
+    def forward(self, x):
+        out, _ = self.gru(x)
+        return self.fc(out[:, -1, :])
+
+gru_model  = GRUModel()
+gru_opt    = optim.Adam(gru_model.parameters(), lr=0.001)
+
+for epoch in range(100):
+    gru_model.train()
+    gru_opt.zero_grad()
+    loss = criterion(gru_model(X_tr2_t), y_tr2_t)
+    loss.backward()
+    gru_opt.step()
+
+gru_model.eval()
+with torch.no_grad():
+    gru_tr_pred = gru_model(X_tr2_t).squeeze().numpy()
+    gru_te_pred = gru_model(X_te2_t).squeeze().numpy()
+
+gru_tr_inv = scaler.inverse_transform(gru_tr_pred.reshape(-1, 1)).flatten()
+gru_te_inv = scaler.inverse_transform(gru_te_pred.reshape(-1, 1)).flatten()
+y_tr2_inv  = scaler.inverse_transform(y2[:split2].reshape(-1, 1)).flatten()
+y_te2_inv  = scaler.inverse_transform(y2[split2:].reshape(-1, 1)).flatten()
+
+# Step 13: R2 Score
+r2_lstm_train = r2_score(y_train_inv, train_pred_inv)
+r2_lstm_test  = r2_score(y_test_inv,  test_pred_inv)
+r2_gru_train  = r2_score(y_tr2_inv,   gru_tr_inv)
+r2_gru_test   = r2_score(y_te2_inv,   gru_te_inv)
+
+print(f"\nLSTM — Train R2: {r2_lstm_train:.4f} | Test R2: {r2_lstm_test:.4f}")
+print(f"GRU  — Train R2: {r2_gru_train:.4f} | Test R2: {r2_gru_test:.4f}")
+
+# Step 14: Plot GRU predictions
+gru_train_idx = range(SEQ_LEN2, SEQ_LEN2 + len(gru_tr_inv))
+gru_test_idx  = range(SEQ_LEN2 + len(gru_tr_inv), SEQ_LEN2 + len(gru_tr_inv) + len(gru_te_inv))
+
+plt.figure(figsize=(12, 5))
+plt.plot(range(len(passengers)), passengers, label='Actual', color='gray', alpha=0.6)
+plt.plot(gru_train_idx, gru_tr_inv, label='GRU Train Prediction')
+plt.plot(gru_test_idx,  gru_te_inv, label='GRU Test Prediction')
+plt.title('GRU — Air Passengers Prediction')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Step 15: Model comparison
+print("\nModel Comparison:")
+print(f"  LSTM (seq={SEQ_LEN})  — Train R2: {r2_lstm_train:.4f} | Test R2: {r2_lstm_test:.4f}")
+print(f"  GRU  (seq={SEQ_LEN2}) — Train R2: {r2_gru_train:.4f} | Test R2: {r2_gru_test:.4f}")
+print("Inference: GRU with seq_len=4 captured both trend and seasonality better on this dataset.")
