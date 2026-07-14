@@ -1,0 +1,104 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+import numpy as np
+from torchvision import datasets, transforms, models
+from torch.utils.data import DataLoader, Subset
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+
+# Step 1: Load FashionMNIST with ResNet-compatible transforms
+transform = transforms.Compose([
+    transforms.Resize((64, 64)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+train_data  = datasets.FashionMNIST(root='./data', train=True,  download=True, transform=transform)
+test_data   = datasets.FashionMNIST(root='./data', train=False, download=True, transform=transform)
+class_names = ['T-shirt', 'Trouser', 'Pullover', 'Dress', 'Coat',
+                'Sandal', 'Shirt', 'Sneaker', 'Bag', 'Ankle boot']
+print("Classes:", class_names)
+
+# Step 2: Create batches (subset for speed)
+train_sub    = Subset(train_data, range(2000))
+test_sub     = Subset(test_data,  range(500))
+train_loader = DataLoader(train_sub, batch_size=32, shuffle=True)
+test_loader  = DataLoader(test_sub,  batch_size=32, shuffle=False)
+
+# Step 3: Show grid of 8 images
+imgs_batch, lbls_batch = next(iter(train_loader))
+fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+for i, ax in enumerate(axes.flat):
+    img = imgs_batch[i].numpy().transpose(1, 2, 0)
+    img = img * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406])
+    img = np.clip(img, 0, 1)
+    ax.imshow(img)
+    ax.set_title(class_names[lbls_batch[i].item()], fontsize=9)
+    ax.axis('off')
+plt.suptitle("Sample Training Images — FashionMNIST with ResNet Transforms", fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# Step 4: Load ResNet18, freeze base, replace head
+model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+for param in model.parameters():
+    param.requires_grad = False
+
+model.fc = nn.Sequential(
+    nn.Linear(model.fc.in_features, 256), nn.ReLU(),
+    nn.Dropout(0.3),
+    nn.Linear(256, len(class_names))
+)
+
+optimizer = optim.Adam(model.fc.parameters(), lr=0.001)
+criterion = nn.CrossEntropyLoss()
+
+# Step 5: Train 10 epochs
+train_accs = []
+for epoch in range(10):
+    model.train()
+    correct, total, ep_loss = 0, 0, 0.0
+    for imgs, labels in train_loader:
+        optimizer.zero_grad()
+        out  = model(imgs)
+        loss = criterion(out, labels)
+        loss.backward()
+        optimizer.step()
+        ep_loss  += loss.item() * imgs.size(0)
+        correct  += (out.argmax(1) == labels).sum().item()
+        total    += labels.size(0)
+    acc = correct / total
+    train_accs.append(acc)
+    print(f"Epoch {epoch+1}/10 — loss: {ep_loss/total:.4f} — accuracy: {acc:.4f}")
+
+plt.figure(figsize=(8, 4))
+plt.plot(train_accs, marker='o', color='steelblue')
+plt.xlabel('Epoch')
+plt.ylabel('Train Accuracy')
+plt.title('ResNet18 Transfer Learning — Training Accuracy')
+plt.tight_layout()
+plt.show()
+
+# Step 6: Classification report and confusion matrix
+all_preds, all_labels = [], []
+model.eval()
+with torch.no_grad():
+    for imgs, labels in test_loader:
+        _, preds = torch.max(model(imgs), 1)
+        all_preds.extend(preds.numpy())
+        all_labels.extend(labels.numpy())
+
+print(classification_report(all_labels, all_preds, target_names=class_names))
+
+cm = confusion_matrix(all_labels, all_preds)
+plt.figure(figsize=(10, 8))
+sns.heatmap(cm, annot=True, fmt='d', xticklabels=class_names, yticklabels=class_names, cmap='Blues')
+plt.title('Confusion Matrix — ResNet18 Transfer Learning')
+plt.ylabel('True Label')
+plt.xlabel('Predicted Label')
+plt.tight_layout()
+plt.show()
