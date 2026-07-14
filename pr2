@@ -1,0 +1,237 @@
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from scipy.signal import convolve2d
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+
+# -----------------------------------------------------------
+# Dataset path — update this to your local path
+# Folder structure expected:
+#   BASE_DIR/
+#     training/
+#       10/  20/  50/  100/  200/  500/  2000/  Background/
+#     validation/
+#       10/  20/  50/  100/  200/  500/  2000/  Background/
+# -----------------------------------------------------------
+BASE_DIR  = "indian_currency_new"
+TRAIN_DIR = os.path.join(BASE_DIR, "training")
+VAL_DIR   = os.path.join(BASE_DIR, "validation")
+
+# Step 1: Explore dataset
+print("Base folder contents:", os.listdir(BASE_DIR))
+print("Train folder contents:", os.listdir(TRAIN_DIR))
+print("Validation folder contents:", os.listdir(VAL_DIR))
+
+# Step 2: Class counts
+classes   = sorted(os.listdir(TRAIN_DIR))
+class2idx = {c: i for i, c in enumerate(classes)}
+print("\nClasses:", classes)
+for c in classes:
+    n_tr  = len(os.listdir(os.path.join(TRAIN_DIR, c)))
+    n_val = len(os.listdir(os.path.join(VAL_DIR, c)))
+    print(f"  {c}: train={n_tr}, val={n_val}")
+
+# Step 3: View random images
+def load_random_img(folder):
+    cls      = random.choice(os.listdir(folder))
+    path     = os.path.join(folder, cls)
+    img_name = random.choice(os.listdir(path))
+    img      = Image.open(os.path.join(path, img_name)).convert('RGB')
+    return img, cls
+
+random.seed(42)
+tr_img,  tr_cls  = load_random_img(TRAIN_DIR)
+val_img, val_cls = load_random_img(VAL_DIR)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].imshow(tr_img);  axes[0].set_title(f"Training - Rs.{tr_cls}");  axes[0].axis('off')
+axes[1].imshow(val_img); axes[1].set_title(f"Validation - Rs.{val_cls}"); axes[1].axis('off')
+plt.suptitle("Random Samples from Dataset", fontsize=12, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# Step 4: Convolution with identity kernel
+sample_path = os.path.join(TRAIN_DIR, '10', os.listdir(os.path.join(TRAIN_DIR, '10'))[0])
+img_bgr  = np.array(Image.open(sample_path).convert('RGB'))
+img_gray = np.array(Image.open(sample_path).convert('L'), dtype=np.float32)
+
+kernel_identity = np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]])
+conv_img = convolve2d(img_gray, kernel_identity, mode='valid')
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+axes[0].imshow(img_bgr);            axes[0].set_title("Original Image");              axes[0].axis('off')
+axes[1].imshow(img_gray, cmap='gray'); axes[1].set_title("Grayscale");               axes[1].axis('off')
+axes[2].imshow(conv_img, cmap='gray'); axes[2].set_title("After Convolution");        axes[2].axis('off')
+plt.tight_layout()
+plt.show()
+
+# Step 5: Vertical edge detection (Sobel)
+kernel_v      = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
+vertical_edges = convolve2d(img_gray, kernel_v, mode='same')
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].imshow(img_gray, cmap='gray');          axes[0].set_title("Grayscale");              axes[0].axis('off')
+axes[1].imshow(np.abs(vertical_edges), cmap='gray'); axes[1].set_title("Vertical Edges");    axes[1].axis('off')
+plt.tight_layout()
+plt.show()
+
+# Step 6: Horizontal edge detection (Sobel)
+kernel_h         = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
+horizontal_edges = np.abs(convolve2d(img_gray, kernel_h, mode='same'))
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].imshow(img_gray, cmap='gray');     axes[0].set_title("Grayscale");                  axes[0].axis('off')
+axes[1].imshow(horizontal_edges, cmap='gray'); axes[1].set_title("Horizontal Edges");       axes[1].axis('off')
+plt.tight_layout()
+plt.show()
+
+# Step 7: Dataset class with 70:30 split, 64x64, batch 32
+IMG_SIZE   = 64
+BATCH_SIZE = 32
+
+class CurrencyDataset(Dataset):
+    def __init__(self, root_dir, classes, transform=None):
+        self.samples   = []
+        self.labels    = []
+        self.transform = transform
+        for i, cls in enumerate(classes):
+            cls_path = os.path.join(root_dir, cls)
+            for fname in os.listdir(cls_path):
+                if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    self.samples.append(os.path.join(cls_path, fname))
+                    self.labels.append(i)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.samples[idx]).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        return img, self.labels[idx]
+
+tfm = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+])
+
+full_train  = CurrencyDataset(TRAIN_DIR, classes, tfm)
+n_train     = int(0.7 * len(full_train))
+n_val_split = len(full_train) - n_train
+train_sub, val_sub = torch.utils.data.random_split(
+    full_train, [n_train, n_val_split],
+    generator=torch.Generator().manual_seed(123)
+)
+
+train_loader = DataLoader(train_sub, batch_size=BATCH_SIZE, shuffle=True)
+val_loader   = DataLoader(val_sub,   batch_size=BATCH_SIZE, shuffle=False)
+
+print(f"\nTrain batches: {len(train_loader)} | Val batches: {len(val_loader)}")
+print(f"Train samples: {n_train} | Val samples: {n_val_split}")
+
+# Step 8: CNN Architecture
+class CNNModel(nn.Module):
+    def __init__(self, num_classes=8):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3,   32,  (3, 3), padding=1), nn.ReLU(), nn.MaxPool2d(2, 2),
+            nn.Conv2d(32,  64,  (3, 3), padding=1), nn.ReLU(), nn.MaxPool2d(2, 2),
+            nn.Conv2d(64,  128, (3, 3), padding=1), nn.ReLU(), nn.MaxPool2d(2, 2),
+            nn.Conv2d(128, 256, (3, 3), padding=1), nn.ReLU(), nn.MaxPool2d(2, 2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256 * 4 * 4, num_classes)
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+cnn = CNNModel(num_classes=len(classes))
+print(cnn)
+
+# Step 9 & 10: Train with EarlyStopping
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(cnn.parameters(), lr=0.001)
+
+patience, best_loss, wait = 3, float('inf'), 0
+train_accs, val_accs      = [], []
+
+for epoch in range(50):
+    cnn.train()
+    correct, total, ep_loss = 0, 0, 0.0
+    for imgs, labels in train_loader:
+        labels = torch.tensor(labels) if not isinstance(labels, torch.Tensor) else labels
+        optimizer.zero_grad()
+        out  = cnn(imgs)
+        loss = criterion(out, labels)
+        loss.backward()
+        optimizer.step()
+        ep_loss += loss.item() * imgs.size(0)
+        correct += (out.argmax(1) == labels).sum().item()
+        total   += labels.size(0)
+    train_acc = correct / total
+    train_accs.append(train_acc)
+
+    cnn.eval()
+    v_correct, v_total, v_loss = 0, 0, 0.0
+    with torch.no_grad():
+        for imgs, labels in val_loader:
+            labels = torch.tensor(labels) if not isinstance(labels, torch.Tensor) else labels
+            out    = cnn(imgs)
+            loss   = criterion(out, labels)
+            v_loss   += loss.item() * imgs.size(0)
+            v_correct += (out.argmax(1) == labels).sum().item()
+            v_total   += labels.size(0)
+    val_acc = v_correct / v_total
+    val_accs.append(val_acc)
+
+    print(f"Epoch {epoch+1}/50 — loss: {ep_loss/total:.4f} — acc: {train_acc:.4f}"
+          f" — val_loss: {v_loss/v_total:.4f} — val_acc: {val_acc:.4f}")
+
+    if v_loss / v_total < best_loss:
+        best_loss = v_loss / v_total
+        wait = 0
+        torch.save(cnn.state_dict(), 'best_cnn.pt')
+    else:
+        wait += 1
+        if wait >= patience:
+            print(f"Epoch {epoch+1}: early stopping")
+            break
+
+# Step 11: Final accuracy
+cnn.load_state_dict(torch.load('best_cnn.pt'))
+cnn.eval()
+
+tr_correct, tr_total = 0, 0
+for imgs, labels in train_loader:
+    labels = torch.tensor(labels) if not isinstance(labels, torch.Tensor) else labels
+    tr_correct += (cnn(imgs).argmax(1) == labels).sum().item()
+    tr_total   += labels.size(0)
+
+val_correct, val_total = 0, 0
+for imgs, labels in val_loader:
+    labels = torch.tensor(labels) if not isinstance(labels, torch.Tensor) else labels
+    val_correct += (cnn(imgs).argmax(1) == labels).sum().item()
+    val_total   += labels.size(0)
+
+print(f"\nTraining Accuracy:   {tr_correct/tr_total*100:.2f}%")
+print(f"Validation Accuracy: {val_correct/val_total*100:.2f}%")
+
+# Plot accuracy history
+plt.figure(figsize=(10, 4))
+plt.plot(train_accs, label='Train Accuracy', color='steelblue')
+plt.plot(val_accs,   label='Val Accuracy',   color='orange')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.title('CNN Training History — Indian Currency Classification')
+plt.legend()
+plt.tight_layout()
+plt.show()
