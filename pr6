@@ -1,0 +1,187 @@
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+
+# --------------------------------------------------
+# Set these to your actual image folder paths
+# Thermal folder  : 5 normal thermal images
+# Thermal2 folder : 6 test thermal images (may have anomalies)
+# --------------------------------------------------
+THERMAL_DIR  = "thermal"
+THERMAL2_DIR = "thermal_data2"
+IMG_SIZE     = 128
+
+def load_img(path):
+    img = Image.open(path).convert('L').resize((IMG_SIZE, IMG_SIZE))
+    return np.array(img, dtype=np.float32) / 255.0
+
+def load_folder(folder):
+    imgs = []
+    for f in sorted(os.listdir(folder)):
+        if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+            imgs.append(load_img(os.path.join(folder, f)))
+    return imgs
+
+thermal_imgs  = load_folder(THERMAL_DIR)
+thermal2_imgs = load_folder(THERMAL2_DIR)
+print(f"Thermal images: {len(thermal_imgs)} | Thermal2 images: {len(thermal2_imgs)}")
+
+# Step 1: Grid display
+n1, n2 = len(thermal_imgs), len(thermal2_imgs)
+fig, axes = plt.subplots(2, max(n1, n2), figsize=(16, 6))
+for i, im in enumerate(thermal_imgs):
+    axes[0, i].imshow(im, cmap='inferno'); axes[0, i].set_title(f'T-{i+1}'); axes[0, i].axis('off')
+for i, im in enumerate(thermal2_imgs):
+    axes[1, i].imshow(im, cmap='inferno'); axes[1, i].set_title(f'T2-{i+1}'); axes[1, i].axis('off')
+plt.suptitle("Thermal Images Grid", fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# Step 2: Otsu thresholding
+def otsu_threshold(img):
+    pixel_counts = np.bincount((img * 255).astype(np.uint8).flatten(), minlength=256)
+    total        = img.size
+    sum_total    = np.dot(range(256), pixel_counts)
+    sumB = wB = max_var = threshold = 0
+    for t in range(256):
+        wB += pixel_counts[t]
+        wF  = total - wB
+        if wB == 0 or wF == 0:
+            continue
+        sumB += t * pixel_counts[t]
+        mB = sumB / wB
+        mF = (sum_total - sumB) / wF
+        var = wB * wF * (mB - mF) ** 2
+        if var > max_var:
+            max_var   = var
+            threshold = t
+    return threshold / 255.0
+
+fig, axes = plt.subplots(2, n1, figsize=(14, 5))
+for i, img in enumerate(thermal_imgs):
+    thr    = otsu_threshold(img)
+    binary = (img > thr).astype(np.float32)
+    print(f"Image {i+1} Otsu threshold: {thr:.3f}")
+    axes[0, i].imshow(img,    cmap='inferno'); axes[0, i].set_title(f'T-{i+1}');          axes[0, i].axis('off')
+    axes[1, i].imshow(binary, cmap='gray');    axes[1, i].set_title(f'Binary thr={thr:.2f}'); axes[1, i].axis('off')
+plt.suptitle("Otsu Binarization", fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# Step 3: Distribution plot
+fig, axes = plt.subplots(1, n1, figsize=(14, 3))
+for i, img in enumerate(thermal_imgs):
+    axes[i].hist(img.flatten(), bins=50, color='steelblue', alpha=0.8)
+    axes[i].set_title(f'T-{i+1}')
+plt.suptitle("Pixel Intensity Distribution — Thermal Images", fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# Step 4: DataLoader
+class ThermalDataset(Dataset):
+    def __init__(self, images):
+        self.images = [torch.tensor(img).unsqueeze(0) for img in images]
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        return self.images[idx]
+
+train_loader = DataLoader(ThermalDataset(thermal_imgs), batch_size=3, shuffle=True)
+print(f"Batches: {len(train_loader)}")
+
+# Step 5: VAE Encoder
+class VAEEncoder(nn.Module):
+    def __init__(self, latent_dim=32):
+        super().__init__()
+        self.net     = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(IMG_SIZE * IMG_SIZE, 512), nn.ReLU(),
+            nn.Linear(512, 256),                 nn.ReLU())
+        self.mu      = nn.Linear(256, latent_dim)
+        self.log_var = nn.Linear(256, latent_dim)
+
+    def forward(self, x):
+        h = self.net(x)
+        return self.mu(h), self.log_var(h)
+
+# Step 6: VAE Decoder
+class VAEDecoder(nn.Module):
+    def __init__(self, latent_dim=32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, 256),          nn.ReLU(),
+            nn.Linear(256, 512),                 nn.ReLU(),
+            nn.Linear(512, IMG_SIZE * IMG_SIZE), nn.Sigmoid())
+
+    def forward(self, z):
+        return self.net(z).view(-1, 1, IMG_SIZE, IMG_SIZE)
+
+# Step 7: VAE
+class VAE(nn.Module):
+    def __init__(self, latent_dim=32):
+        super().__init__()
+        self.encoder = VAEEncoder(latent_dim)
+        self.decoder = VAEDecoder(latent_dim)
+
+    def reparameterize(self, mu, log_var):
+        std = torch.exp(0.5 * log_var)
+        return mu + torch.randn_like(std) * std
+
+    def forward(self, x):
+        mu, log_var = self.encoder(x)
+        z = self.reparameterize(mu, log_var)
+        return self.decoder(z), mu, log_var
+
+vae = VAE(32)
+
+# Step 8: Train VAE — 100 epochs
+def vae_loss(recon, x, mu, log_var):
+    recon_loss = nn.functional.mse_loss(recon, x, reduction='sum')
+    kl_loss    = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
+    return recon_loss + kl_loss
+
+optimizer = optim.Adam(vae.parameters(), lr=1e-3)
+
+for epoch in range(100):
+    vae.train()
+    ep_loss = 0.0
+    for batch in train_loader:
+        optimizer.zero_grad()
+        recon, mu, log_var = vae(batch)
+        loss = vae_loss(recon, batch, mu, log_var)
+        loss.backward()
+        optimizer.step()
+        ep_loss += loss.item()
+    if (epoch + 1) % 10 == 0:
+        print(f"Epoch {epoch+1}/100 — Loss: {ep_loss:.2f}")
+
+# Step 9 & 10: Reconstruct thermal2 and show anomaly heatmaps
+n_show  = min(4, len(thermal2_imgs))
+t2_imgs = thermal2_imgs[:n_show]
+t2_tensor = torch.stack([torch.tensor(im).unsqueeze(0) for im in t2_imgs])
+
+vae.eval()
+with torch.no_grad():
+    recon_batch, _, _ = vae(t2_tensor)
+
+fig, axes = plt.subplots(3, n_show, figsize=(14, 7))
+for i in range(n_show):
+    orig  = t2_tensor[i, 0].numpy()
+    recon = recon_batch[i, 0].numpy()
+    diff  = np.abs(orig - recon)
+    axes[0, i].imshow(orig,  cmap='inferno'); axes[0, i].set_title(f'Original T2-{i+1}');     axes[0, i].axis('off')
+    axes[1, i].imshow(recon, cmap='inferno'); axes[1, i].set_title(f'Reconstructed');           axes[1, i].axis('off')
+    axes[2, i].imshow(diff,  cmap='hot');     axes[2, i].set_title(f'Anomaly Heatmap');         axes[2, i].axis('off')
+axes[0, 0].set_ylabel('Original',       fontsize=9)
+axes[1, 0].set_ylabel('Reconstructed',  fontsize=9)
+axes[2, 0].set_ylabel('Heatmap (error)', fontsize=9)
+plt.suptitle("VAE Anomaly Detection — Thermal Images", fontweight='bold')
+plt.tight_layout()
+plt.show()
