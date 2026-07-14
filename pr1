@@ -1,0 +1,153 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+
+# Step 1: Load dataset
+transform = transforms.ToTensor()
+train_data = datasets.MNIST(root='./data', train=True,  download=True, transform=transform)
+test_data  = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
+test_loader  = DataLoader(test_data,  batch_size=64, shuffle=False)
+
+print("Training data shape:", train_data.data.shape)
+print("Training labels shape:", train_data.targets.shape)
+print("Testing data shape:", test_data.data.shape)
+print("Testing labels shape:", test_data.targets.shape)
+
+# Step 2: View a training image
+img_tr  = train_data.data.numpy()
+lbl_tr  = train_data.targets.numpy()
+plt.imshow(img_tr[7], cmap='viridis')
+plt.title(lbl_tr[7])
+plt.show()
+
+# Step 3: View a test image in grayscale
+img_test = test_data.data.numpy()
+lbl_test = test_data.targets.numpy()
+plt.imshow(img_tr[7], cmap='gray')
+plt.title(f"Digit label: {lbl_tr[7]}")
+plt.axis('off')
+plt.show()
+
+# Step 4: Define ANN model
+class ANN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(784, 522)
+        self.fc2 = nn.Linear(522, 348)
+        self.fc3 = nn.Linear(348, 232)
+        self.out = nn.Linear(232, 10)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.flatten(x)
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        x = self.relu(self.fc3(x))
+        return self.out(x)
+
+model = ANN()
+print(model)
+
+# Step 5 & 6: Train with EarlyStopping
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+n_val      = int(0.1 * len(train_data))
+n_train    = len(train_data) - n_val
+train_sub, val_sub = torch.utils.data.random_split(train_data, [n_train, n_val])
+train_ld   = DataLoader(train_sub, batch_size=64, shuffle=True)
+val_ld     = DataLoader(val_sub,   batch_size=64, shuffle=False)
+
+patience, best_val_loss, wait = 3, float('inf'), 0
+train_losses, val_losses = [], []
+
+for epoch in range(200):
+    model.train()
+    running_loss = 0
+    for imgs, labels in train_ld:
+        optimizer.zero_grad()
+        loss = criterion(model(imgs.float()), labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+
+    model.eval()
+    val_loss, correct, total = 0, 0, 0
+    with torch.no_grad():
+        for imgs, labels in val_ld:
+            out  = model(imgs.float())
+            val_loss += criterion(out, labels).item()
+            correct  += (out.argmax(1) == labels).sum().item()
+            total    += labels.size(0)
+
+    avg_train = running_loss / len(train_ld)
+    avg_val   = val_loss / len(val_ld)
+    val_acc   = correct / total
+    train_losses.append(avg_train)
+    val_losses.append(avg_val)
+    print(f"Epoch {epoch+1}/200 — loss: {avg_train:.4f} — val_loss: {avg_val:.4f} — val_accuracy: {val_acc:.4f}")
+
+    if avg_val < best_val_loss:
+        best_val_loss = avg_val
+        wait = 0
+        torch.save(model.state_dict(), 'best_model.pt')
+    else:
+        wait += 1
+        if wait >= patience:
+            print(f"Epoch {epoch+1}: early stopping")
+            break
+
+# Plot training history
+plt.plot(train_losses, label='Train Loss')
+plt.plot(val_losses,   label='Val Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training History')
+plt.legend()
+plt.show()
+
+# Step 7: Predict with a test image from the library
+model.load_state_dict(torch.load('best_model.pt'))
+model.eval()
+
+sample_img   = test_data[0][0]
+sample_label = test_data[0][1]
+plt.imshow(sample_img.squeeze(), cmap='gray')
+plt.title(f"Actual Digit: {sample_label}")
+plt.axis('off')
+plt.show()
+
+with torch.no_grad():
+    prediction     = model(sample_img.unsqueeze(0).float())
+    predicted_digit = torch.argmax(prediction, dim=1).item()
+
+print("Predicted Digit:", predicted_digit)
+print("Actual Digit:   ", sample_label)
+
+# Step 8: Predict with an external digit image
+import cv2
+
+img_out = cv2.imread("external_digit.jpg", cv2.IMREAD_GRAYSCALE)
+if img_out is not None:
+    img_out = cv2.resize(img_out, (28, 28))
+    _, img_out = cv2.threshold(img_out, 127, 255, cv2.THRESH_BINARY)
+    img_out = 255 - img_out
+    plt.imshow(img_out, cmap='gray')
+    plt.axis('off')
+    plt.show()
+
+    img_input = torch.tensor(img_out / 255.0, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    with torch.no_grad():
+        prediction = model(img_input)
+        probs      = torch.softmax(prediction, dim=1).numpy()
+        pred_digit = np.argmax(probs)
+    print("Prediction Probabilities:", probs)
+    print("Predicted Digit:", pred_digit)
+else:
+    print("external_digit.jpg not found — skipping step 8")
