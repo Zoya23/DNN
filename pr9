@@ -1,0 +1,159 @@
+import re
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Step 1: Create health data file
+health_content = """HEALTH INFORMATION DOCUMENT
+
+1. Nutrition and Diet
+A balanced diet includes macronutrients: carbohydrates, proteins, and fats.
+Carbohydrates provide 4 calories per gram and serve as the primary energy source.
+Proteins provide 4 calories per gram and are essential for muscle repair and immune function.
+Healthy fats such as omega-3 fatty acids are found in fish, walnuts, and flaxseed.
+The recommended daily intake of fiber is 25-30 grams for adults.
+Vitamins and minerals act as cofactors in metabolic processes and immune function.
+
+2. Hydration and Water Intake
+Water constitutes approximately 60 percent of the human body weight.
+Hydration is critical - the recommended water intake is 2-3 litres per day for adults.
+Dehydration of even 2 percent body weight can impair cognitive and physical performance.
+Electrolytes such as sodium, potassium, and magnesium regulate fluid balance in cells.
+
+3. Mental Health and Well-being
+Mental health encompasses emotional, psychological, and social well-being.
+Mindfulness meditation has been shown to reduce anxiety and depression symptoms by 40 percent.
+Regular physical activity releases endorphins, improving mood and reducing stress hormones.
+The WHO recommends 150 minutes of moderate aerobic activity per week for adults.
+Sleep deprivation impairs prefrontal cortex function, reducing decision-making ability.
+
+4. Preventive Healthcare
+Vaccination prevents 2-3 million deaths annually from infectious diseases worldwide.
+Regular health screenings detect conditions like hypertension, diabetes, and cancer early.
+Smoking cessation within 5 years reduces heart disease risk to that of a non-smoker.
+Hand hygiene with soap and water for 20 seconds reduces infection transmission by 50 percent.
+"""
+
+with open('health_data.txt', 'w') as f:
+    f.write(health_content)
+print("Health data file created: health_data.txt")
+
+# Step 2: Install Ollama (instructions)
+# pip install ollama
+# ollama pull llama3
+print("To use Ollama LLM: run 'ollama pull llama3' in terminal, then set USE_OLLAMA = True below")
+USE_OLLAMA = False  # Set to True if Ollama is running locally
+
+# Step 3 & 4: Load data and chunk
+with open('health_data.txt', 'r') as f:
+    raw_text = f.read()
+
+def chunk_text(text, chunk_size=80):
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    chunks, current = [], ""
+    for sent in sentences:
+        if len(current.split()) + len(sent.split()) < chunk_size:
+            current += " " + sent
+        else:
+            if current.strip():
+                chunks.append(current.strip())
+            current = sent
+    if current.strip():
+        chunks.append(current.strip())
+    return [c for c in chunks if len(c.split()) > 5]
+
+chunks = chunk_text(raw_text)
+print(f"\nDocument chunked into {len(chunks)} passages")
+for i, c in enumerate(chunks):
+    print(f"  Chunk {i+1}: {c[:80]}...")
+
+# TF-IDF vectorizer
+def compute_tfidf(chunks):
+    all_words = sorted(set(w for c in chunks for w in re.findall(r'\b[a-z]+\b', c.lower())))
+    word2id   = {w: i for i, w in enumerate(all_words)}
+    n_docs    = len(chunks)
+
+    tf_matrix = np.zeros((n_docs, len(all_words)))
+    for d, chunk in enumerate(chunks):
+        words_in_doc = re.findall(r'\b[a-z]+\b', chunk.lower())
+        for w in words_in_doc:
+            tf_matrix[d, word2id[w]] += 1
+        if words_in_doc:
+            tf_matrix[d] /= len(words_in_doc)
+
+    idf = np.zeros(len(all_words))
+    for j in range(len(all_words)):
+        df = np.sum(tf_matrix[:, j] > 0)
+        idf[j] = math.log((n_docs + 1) / (df + 1)) + 1.0
+
+    tfidf_matrix = tf_matrix * idf
+    return tfidf_matrix, word2id, idf, all_words
+
+tfidf_matrix, word2id, idf, all_words = compute_tfidf(chunks)
+
+def vectorize_query(query, word2id, idf, all_words):
+    words    = re.findall(r'\b[a-z]+\b', query.lower())
+    vec      = np.zeros(len(all_words))
+    for w in words:
+        if w in word2id:
+            vec[word2id[w]] += 1
+    if words:
+        vec /= len(words)
+    vec *= idf
+    return vec
+
+def retrieve(query, tfidf_matrix, chunks, top_k=2):
+    qvec  = vectorize_query(query, word2id, idf, all_words)
+    norms = np.linalg.norm(tfidf_matrix, axis=1) * np.linalg.norm(qvec) + 1e-8
+    sims  = tfidf_matrix @ qvec / norms
+    top   = np.argsort(sims)[::-1][:top_k]
+    return [chunks[i] for i in top], sims[top]
+
+def generate_answer(question, retrieved_chunks):
+    if USE_OLLAMA:
+        import ollama
+        context = "\n".join(retrieved_chunks)
+        prompt  = f"Context:\n{context}\n\nQuestion: {question}\nAnswer concisely using only the context:"
+        resp    = ollama.chat(model='llama3', messages=[{'role': 'user', 'content': prompt}])
+        return resp['message']['content'].strip()
+    else:
+        q_words   = set(re.findall(r'\b[a-z]+\b', question.lower()))
+        best_sent = ""
+        best_score = 0
+        for chunk in retrieved_chunks:
+            for sent in re.split(r'(?<=[.!?])\s+', chunk):
+                s_words = set(re.findall(r'\b[a-z]+\b', sent.lower()))
+                score   = len(q_words & s_words)
+                if score > best_score:
+                    best_score = score
+                    best_sent  = sent
+        return best_sent if best_sent else retrieved_chunks[0].split('.')[0] + '.'
+
+# Step 5: Test with questions
+questions = [
+    "How many calories do proteins provide per gram?",
+    "What is the recommended water intake for adults?",
+    "How does mindfulness meditation help mental health?",
+    "What does the WHO recommend for physical activity?",
+    "How can smoking cessation benefit heart health?"
+]
+
+print("\n" + "=" * 60)
+all_scores = []
+for q in questions:
+    retrieved, scores = retrieve(q, tfidf_matrix, chunks)
+    answer = generate_answer(q, retrieved)
+    print(f"Q: {q}")
+    print(f"A: {answer}\n")
+    all_scores.append(scores[0])
+
+# Visualize retrieval scores
+plt.figure(figsize=(10, 4))
+plt.bar(range(len(questions)), all_scores, color='steelblue')
+plt.xticks(range(len(questions)), [f"Q{i+1}" for i in range(len(questions))])
+plt.ylabel('Cosine Similarity Score')
+plt.title('RAG — Retrieval Similarity Scores per Question')
+plt.tight_layout()
+plt.show()
+
+print("Top retrieval similarity scores:", [round(s, 3) for s in all_scores])
