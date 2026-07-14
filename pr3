@@ -1,0 +1,99 @@
+import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Step 1: Input text
+text = [
+    "Natural Language Processing is a branch of Artificial Intelligence that enables machines to understand human language.",
+    "It is widely used in applications such as Text Summarization, Machine Translation, Sentiment Analysis, and Chatbots.",
+    "Recurrent Neural Networks are designed to handle sequential data by maintaining memory of previous inputs.",
+    "Deep learning models like LSTM and GRU are capable of learning long-term dependencies in sequential data.",
+    "Sequence prediction involves predicting the next word based on previously observed elements in the sequence."
+]
+strtext = " ".join(text)
+print(strtext)
+
+# Step 2: Word-to-number dictionary
+words     = strtext.lower().replace('.', '').replace(',', '').split()
+vocab     = sorted(set(words))
+word2idx  = {w: i for i, w in enumerate(vocab)}
+idx2word  = {i: w for w, i in word2idx.items()}
+vocab_size = len(vocab)
+print(f"\nVocabulary size: {vocab_size}")
+print(dict(list(word2idx.items())[:20]))
+
+# Step 3: Sequence length
+seq_len = 2
+
+# Step 4 & 5: Build X (sequences) and Y (next word)
+encoded = [word2idx[w] for w in words]
+X_raw, Y_raw = [], []
+for i in range(len(encoded) - seq_len):
+    X_raw.append(encoded[i:i + seq_len])
+    Y_raw.append(encoded[i + seq_len])
+X_raw = np.array(X_raw)
+Y_raw = np.array(Y_raw)
+print("\nX shape:", X_raw.shape)
+print("Sample X:", [[idx2word[i] for i in row] for row in X_raw[:5]])
+print("Sample Y:", [idx2word[i] for i in Y_raw[:5]])
+
+# Step 6: One-hot encode X and Y
+def one_hot(arr, n):
+    oh = np.zeros((len(arr), n), dtype=np.float32)
+    oh[np.arange(len(arr)), arr] = 1.0
+    return oh
+
+X_ohe = np.array([one_hot(row, vocab_size) for row in X_raw])
+Y_ohe = one_hot(Y_raw, vocab_size)
+print("\nX one-hot shape:", X_ohe.shape)
+print("Y one-hot shape:", Y_ohe.shape)
+
+# Step 8: RNN Model
+class RNNModel(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.rnn = nn.RNN(input_size, hidden_size, batch_first=True)
+        self.fc  = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        out, _ = self.rnn(x)
+        return self.fc(out[:, -1, :])
+
+model     = RNNModel(vocab_size, 128, vocab_size)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+criterion = nn.CrossEntropyLoss()
+
+X_tensor = torch.tensor(X_ohe, dtype=torch.float32)
+Y_tensor = torch.tensor(Y_raw, dtype=torch.long)
+
+losses = []
+for epoch in range(200):
+    optimizer.zero_grad()
+    loss = criterion(model(X_tensor), Y_tensor)
+    loss.backward()
+    optimizer.step()
+    losses.append(loss.item())
+    if (epoch + 1) % 20 == 0:
+        print(f"Epoch {epoch+1}/200 — Loss: {loss.item():.4f}")
+
+plt.figure(figsize=(10, 4))
+plt.plot(losses, color='steelblue')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('RNN Training Loss')
+plt.tight_layout()
+plt.show()
+
+# Step 9: Predict next word
+def predict_next_word(model, sequence):
+    tokens = sequence.lower().split()
+    idxs   = [word2idx.get(t, 0) for t in tokens[-seq_len:]]
+    x_ohe  = torch.tensor([one_hot(idxs, vocab_size)], dtype=torch.float32)
+    with torch.no_grad():
+        pred = torch.argmax(model(x_ohe), dim=1).item()
+    return idx2word[pred]
+
+test_inputs = ["natural language", "deep learning", "sequence prediction", "recurrent neural"]
+for inp in test_inputs:
+    print(f"Input: '{inp}' -> Predicted: '{predict_next_word(model, inp)}'")
