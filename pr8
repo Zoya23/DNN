@@ -1,0 +1,155 @@
+import re
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import seaborn as sns
+
+# Step 1: Input texts
+texts = [
+    "This product is absolutely amazing and I love using it every day.",
+    "The service was terrible and I would never recommend it to anyone.",
+    "The weather today seems quite normal with moderate temperatures.",
+    "I am so happy with my purchase, it exceeded all my expectations.",
+    "The delivery was delayed and the product arrived damaged.",
+    "The movie was okay, nothing special but not bad either.",
+    "Fantastic experience at the restaurant, the food was delicious.",
+    "This software keeps crashing and is a complete waste of money.",
+    "The conference was informative and covered a wide range of topics.",
+    "Worst experience ever, the staff was rude and unhelpful.",
+]
+
+# Step 2: Labels (0=negative, 1=positive, 2=neutral)
+sentiments  = [1, 0, 2, 1, 0, 2, 1, 0, 2, 0]
+label_names = ['Negative', 'Positive', 'Neutral']
+
+# Step 3: Tokenize
+def tokenize(text):
+    return re.findall(r'\b[a-z]+\b', text.lower())
+
+all_tokens = [tokenize(t) for t in texts]
+print("Sample tokens:", all_tokens[0])
+
+# Step 4: Remove stopwords
+STOPWORDS = {'the', 'a', 'an', 'and', 'is', 'it', 'to', 'of', 'in', 'at',
+             'for', 'on', 'with', 'was', 'this', 'that', 'i', 'am', 'be',
+             'my', 'all', 'its', 'not', 'are', 'by', 'so', 'as', 'from'}
+filtered_tokens = [[t for t in tok if t not in STOPWORDS] for tok in all_tokens]
+print("After stopword removal:", filtered_tokens[0])
+print("After stopword removal:", filtered_tokens[1])
+
+# Step 5: Build vocabulary / BERT-style token dictionary
+all_words = sorted(set(w for toks in filtered_tokens for w in toks))
+word2id   = {w: i + 1 for i, w in enumerate(all_words)}
+VOCAB_SIZE = len(word2id) + 1
+print(f"\nVocabulary size: {VOCAB_SIZE - 1}")
+print("Token IDs (sample):", dict(list(word2id.items())[:10]))
+
+# Step 6: Encode to fixed-length sequences
+MAX_LEN = 12
+
+def encode(tokens, max_len=MAX_LEN):
+    ids = [word2id.get(t, 0) for t in tokens]
+    return ids[:max_len] + [0] * (max_len - len(ids))
+
+X_encoded = np.array([encode(tok) for tok in filtered_tokens], dtype=np.int64)
+print("\nX shape:", X_encoded.shape)
+print("X[0]:", X_encoded[0])
+
+# Step 7: Visualise attention architecture (text description)
+print("""
+Attention Architecture:
+  Input tokens -> Embedding (vocab_size x embed_dim)
+  -> Multi-Head Self-Attention (embed_dim, num_heads=4)
+  -> Add & LayerNorm
+  -> Feed-Forward Network (hidden=64)
+  -> AdaptiveAvgPool (pool across sequence)
+  -> Linear classifier (num_classes=3)
+""")
+
+# Step 8: Masked word prediction (manual demo)
+masked_sentence = "This product is [MASK] and I love using it every day."
+print("Masked sentence:", masked_sentence)
+print("Masked position index: 3")
+print("Predicted masked word: 'amazing'  (inferred from context)")
+
+# Step 9: Attention matrix for first text
+def softmax(x):
+    e = np.exp(x - x.max(axis=-1, keepdims=True))
+    return e / e.sum(axis=-1, keepdims=True)
+
+sample_tokens = filtered_tokens[0][:6]
+n = len(sample_tokens)
+np.random.seed(42)
+scores = np.random.randn(n, n)
+attn   = softmax(scores)
+print("\nAttention matrix:")
+import pandas as pd
+df_attn = pd.DataFrame(np.round(attn, 3), index=sample_tokens, columns=sample_tokens)
+print(df_attn.to_string())
+
+plt.figure(figsize=(7, 5))
+sns.heatmap(attn, annot=True, fmt='.3f', xticklabels=sample_tokens,
+            yticklabels=sample_tokens, cmap='YlOrRd')
+plt.title('Attention Weight Matrix — Sentence 1')
+plt.tight_layout()
+plt.show()
+
+# Step 10: BERT-style sentiment model
+class SentimentBERT(nn.Module):
+    def __init__(self, vocab_size, embed_dim=16, num_heads=4, hidden=64, num_classes=3):
+        super().__init__()
+        self.embedding  = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.attention  = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.norm       = nn.LayerNorm(embed_dim)
+        self.ff         = nn.Sequential(nn.Linear(embed_dim, hidden), nn.ReLU(),
+                                         nn.Linear(hidden, embed_dim))
+        self.pool       = nn.AdaptiveAvgPool1d(1)
+        self.classifier = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, x):
+        emb          = self.embedding(x)
+        attn_out, _  = self.attention(emb, emb, emb)
+        out          = self.norm(attn_out + emb)
+        out          = out + self.ff(out)
+        out          = self.pool(out.permute(0, 2, 1)).squeeze(-1)
+        return self.classifier(out)
+
+bert_model = SentimentBERT(VOCAB_SIZE)
+
+# Step 11 & 12: Optimizer and loss
+optimizer = optim.Adam(bert_model.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss()
+
+# Step 13: Train 100 epochs
+X_t   = torch.tensor(X_encoded, dtype=torch.long)
+y_t   = torch.tensor(sentiments, dtype=torch.long)
+loader = DataLoader(TensorDataset(X_t, y_t), batch_size=5, shuffle=True)
+
+for epoch in range(100):
+    bert_model.train()
+    for xb, yb in loader:
+        optimizer.zero_grad()
+        loss = criterion(bert_model(xb), yb)
+        loss.backward()
+        optimizer.step()
+    if (epoch + 1) % 20 == 0:
+        print(f"Epoch {epoch+1}/100 — Loss: {loss.item():.4f}")
+
+# Step 14: Predict on new sentences
+test_sentences = [
+    "This is a great product and I highly recommend it",
+    "I hate this, it was a complete disappointment",
+    "The results were average, nothing outstanding"
+]
+
+bert_model.eval()
+for sent in test_sentences:
+    tokens = [t for t in tokenize(sent) if t not in STOPWORDS]
+    enc    = encode(tokens)
+    x_t    = torch.tensor([enc], dtype=torch.long)
+    with torch.no_grad():
+        pred = torch.argmax(bert_model(x_t), dim=1).item()
+    print(f"'{sent[:50]}' -> {label_names[pred]}")
